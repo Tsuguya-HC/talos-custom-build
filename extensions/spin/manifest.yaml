@@ -1,0 +1,12 @@
+version: v1alpha1
+metadata:
+  name: spin
+  version: v0.25.1
+  author: Tsuguya
+  description: |
+    This system extension provides support for spin runtime (WebAssembly) containers.
+    Self-built mirror of containerd-shim-spin v0.25.1 (bundles Spin runtime 4.0.1,
+    adds postgres connection-builder set-ca-root / WIT spin-postgres@4.1.0).
+  compatibility:
+    talos:
+      version: ">= v1.0.0"

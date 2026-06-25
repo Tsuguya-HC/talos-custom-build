@@ -1,0 +1,3 @@
+FROM scratch
+COPY manifest.yaml /manifest.yaml
+COPY rootfs /rootfs
