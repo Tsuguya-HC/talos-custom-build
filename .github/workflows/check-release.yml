@@ -5,13 +5,22 @@ on:
     - cron: "0 9 * * 1" # Mon 18:00 JST
   workflow_dispatch: {}
 
-permissions:
-  contents: write
-  packages: write
+# ジョブ側で最小限だけ宣言する。check ジョブは読むだけで、
+# write が要るのは build.yml 側のリリース作成と GHCR push だけ。
+permissions: {}
+
+# 週次の schedule と手動 dispatch が重なっても、同じ版を二重にビルドしない。
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
   check:
+    name: check
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # gh release view で自リポのリリース有無を見るだけ
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
       version: ${{ steps.check.outputs.version }}
@@ -20,12 +29,22 @@ jobs:
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
           LATEST=$(curl -sf https://api.github.com/repos/siderolabs/talos/releases/latest | jq -r .tag_name)
+
+          # この値は build.yml に渡り、最終的に image tag と git ref になる。
+          # 上流が何を書いても良い文字列なので、渡す前にここで形を縛る。
+          if [[ ! "$LATEST" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Unexpected Talos release tag: ${LATEST}"
+            exit 1
+          fi
+
           echo "Latest Talos release: $LATEST"
           echo "version=$LATEST" >> "$GITHUB_OUTPUT"
 
-          if gh release view "$LATEST" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+          if gh release view "$LATEST" --repo "$REPO" > /dev/null 2>&1; then
             echo "Already built $LATEST — skipping"
             echo "should_build=false" >> "$GITHUB_OUTPUT"
           else
@@ -39,4 +58,8 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       talos_version: ${{ needs.check.outputs.version }}
-    secrets: inherit
+    # secrets: inherit を外してある。build.yml が使うのは GITHUB_TOKEN だけで、
+    # それは呼び出し先に自動で渡る。inherit はこのリポの全 secret を渡す。
+    permissions:
+      contents: write # 呼び先がプレリリースを作る
+      packages: write # 呼び先が GHCR へ push する
