@@ -4,8 +4,12 @@
   // No aqua preset: this repo has no aqua.yaml. Its toolchain is whatever the
   // Talos build containers carry.
   "extends": [
-    "config:recommended",
-    "helpers:pinGitHubActionDigests"
+    // config:best-practices = config:recommended + docker:pinDigests
+    // + helpers:pinGitHubActionDigests + :configMigration + :pinDevDependencies
+    // + abandonments:recommended + security:minimumReleaseAgeNpm
+    // + :maintainLockFilesWeekly. The two presets listed separately before are
+    // both inside it now.
+    "config:best-practices"
   ],
 
   "minimumReleaseAge": "3 days",
