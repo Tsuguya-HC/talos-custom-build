@@ -1,0 +1,18 @@
+name: Lint renovate config
+
+# このリポジトリには pull_request で走るワークフローが 1 つも無かった
+# （build.yml は dispatch/call、check-release.yml は schedule/dispatch）。
+# つまり PR に対する検査がこれが最初になる。
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  # Renovate は知らないキーを黙って捨てる。PR も警告も出ないので、
+  # バリデータだけがこの層の間違いを検出できる。
+  lint-renovate:
+    uses: Tsuguya/home-actions/.github/workflows/lint-renovate.yml@2e7f65a9ac3492f91652e2cbd4e267202b5dabfd # v0
+    permissions:
+      contents: read

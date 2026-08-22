@@ -1,12 +1,19 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+
+  // No aqua preset: this repo has no aqua.yaml. Its toolchain is whatever the
+  // Talos build containers carry.
   "extends": [
     "config:recommended",
     "helpers:pinGitHubActionDigests"
   ],
+
   "minimumReleaseAge": "3 days",
+
   "packageRules": [
     {
+      // Only patch and digest. A minor bump to anything in the image build is a
+      // different Talos artifact, which is a decision, not a refresh.
       "description": "Automerge patch updates",
       "matchUpdateTypes": ["patch", "digest"],
       "automerge": true
