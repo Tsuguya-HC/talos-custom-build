@@ -105,7 +105,9 @@ jobs:
             echo "::error::Failed to extract PKGS version: $PKGS_VERSION"
             exit 1
           fi
-          PKGS_COMMIT=$(echo "$PKGS_VERSION" | sed 's/.*-g//')
+          # ${var##*-g} は sed 's/.*-g//' と同じ最長前方一致の除去。
+          # 外部プロセスが要らず、shellcheck SC2001 にも当たらない。
+          PKGS_COMMIT="${PKGS_VERSION##*-g}"
           echo "version=$PKGS_VERSION" >> "$GITHUB_OUTPUT"
           echo "commit=$PKGS_COMMIT" >> "$GITHUB_OUTPUT"
 
