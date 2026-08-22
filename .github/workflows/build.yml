@@ -12,9 +12,15 @@ on:
         type: string
         required: true
 
-permissions:
-  contents: write
-  packages: write
+# ジョブ側で最小限だけ宣言する。ワークフロー全体に write を撒くと、
+# GHCR に push しないジョブまで同じトークンを持つことになる。
+permissions: {}
+
+# talos_version 単位で直列化する。同じ版のビルドが二重に走ると、
+# ローカルレジストリと GHCR のタグを互いに踏む。
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.talos_version }}
+  cancel-in-progress: false
 
 env:
   LOCAL_REGISTRY: localhost:5005
@@ -23,8 +29,12 @@ env:
 
 jobs:
   kernel:
+    name: kernel
     runs-on: ubuntu-latest
     timeout-minutes: 150
+    permissions:
+      contents: read # 自リポの scripts/ を checkout する
+      packages: write # ghcr.io/tsuguya/kernel へ push する
     steps:
       - name: Login to GHCR
         uses: docker/login-action@c99871dec2022cc055c062a10cc1a1310835ceb4 # v4.3.0
@@ -33,10 +43,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # talos_version は check-release.yml 経由だと siderolabs の release tag が
+      # そのまま入ってくる。run: に直接展開すると上流がタグ名にシェルメタ文字を
+      # 入れた瞬間にこの runner でコードが走るので、以降すべて env 経由で渡す。
       - name: Check if kernel already exists
         id: check
+        env:
+          TALOS_VERSION: ${{ inputs.talos_version }}
         run: |
-          if docker manifest inspect ghcr.io/${{ env.USERNAME }}/kernel:${{ inputs.talos_version }} > /dev/null 2>&1; then
+          if docker manifest inspect "ghcr.io/${USERNAME}/kernel:${TALOS_VERSION}" > /dev/null 2>&1; then
             echo "Kernel image already exists — skipping build"
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
@@ -56,6 +71,10 @@ jobs:
       - name: Checkout this repository
         if: steps.check.outputs.exists != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # この checkout の後に git を使う処理は無い。認証ヘッダを .git に
+          # 残すと、後続のビルドステップから読める状態が続く。
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         if: steps.check.outputs.exists != 'true'
@@ -75,6 +94,7 @@ jobs:
           repository: siderolabs/talos
           ref: ${{ inputs.talos_version }}
           path: talos
+          persist-credentials: false
 
       - name: Extract PKGS version
         if: steps.check.outputs.exists != 'true'
@@ -89,12 +109,16 @@ jobs:
           echo "version=$PKGS_VERSION" >> "$GITHUB_OUTPUT"
           echo "commit=$PKGS_COMMIT" >> "$GITHUB_OUTPUT"
 
+      # commit は talos/Makefile の中身、つまり上流が書いた文字列。
+      # 上の正規表現は PKGS_VERSION 全体しか見ていないので、ここでも env 経由。
       - name: Checkout pkgs
         if: steps.check.outputs.exists != 'true'
+        env:
+          PKGS_COMMIT: ${{ steps.pkgs.outputs.commit }}
         run: |
           git clone https://github.com/siderolabs/pkgs.git pkgs
           cd pkgs
-          git checkout ${{ steps.pkgs.outputs.commit }}
+          git checkout "$PKGS_COMMIT"
 
       - name: Apply UFS kernel config
         if: steps.check.outputs.exists != 'true'
@@ -103,7 +127,7 @@ jobs:
       - name: Resolve kernel config dependencies
         if: steps.check.outputs.exists != 'true'
         working-directory: pkgs
-        run: make kernel-olddefconfig USERNAME=${{ env.USERNAME }} PLATFORM=linux/amd64
+        run: make kernel-olddefconfig "USERNAME=${USERNAME}" PLATFORM=linux/amd64
 
       - name: Build kernel
         if: steps.check.outputs.exists != 'true'
@@ -112,28 +136,36 @@ jobs:
           make kernel \
             PLATFORM=linux/amd64 \
             PUSH=true \
-            REGISTRY=${{ env.LOCAL_REGISTRY }} \
-            USERNAME=${{ env.USERNAME }}
+            "REGISTRY=${LOCAL_REGISTRY}" \
+            "USERNAME=${USERNAME}"
 
       - name: Push kernel to GHCR
         if: steps.check.outputs.exists != 'true'
+        env:
+          TALOS_VERSION: ${{ inputs.talos_version }}
+          GHCR_ACTOR: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           CRANE_VERSION=$(curl -sf https://api.github.com/repos/google/go-containerregistry/releases/latest | jq -r .tag_name)
           curl -sL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar xzf - crane
           sudo mv crane /usr/local/bin/
-          echo "${{ secrets.GITHUB_TOKEN }}" | crane auth login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "${GHCR_TOKEN}" | crane auth login ghcr.io -u "${GHCR_ACTOR}" --password-stdin
 
-          TAG=$(curl -sf http://${{ env.LOCAL_REGISTRY }}/v2/${{ env.USERNAME }}/kernel/tags/list | jq -r '.tags[0]')
+          TAG=$(curl -sf "http://${LOCAL_REGISTRY}/v2/${USERNAME}/kernel/tags/list" | jq -r '.tags[0]')
           echo "Local kernel tag: $TAG"
 
           crane copy --insecure \
-            ${{ env.LOCAL_REGISTRY }}/${{ env.USERNAME }}/kernel:${TAG} \
-            ghcr.io/${{ env.USERNAME }}/kernel:${{ inputs.talos_version }}
+            "${LOCAL_REGISTRY}/${USERNAME}/kernel:${TAG}" \
+            "ghcr.io/${USERNAME}/kernel:${TALOS_VERSION}"
 
   imager:
+    name: imager
     needs: kernel
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: write # softprops/action-gh-release がプレリリースを作る
+      packages: write # ghcr.io/tsuguya/{installer-base,imager} へ push する
     steps:
       - name: Free disk space
         run: |
@@ -160,11 +192,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install crane
+        env:
+          GHCR_ACTOR: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           CRANE_VERSION=$(curl -sf https://api.github.com/repos/google/go-containerregistry/releases/latest | jq -r .tag_name)
           curl -sL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar xzf - crane
           sudo mv crane /usr/local/bin/
-          echo "${{ secrets.GITHUB_TOKEN }}" | crane auth login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "${GHCR_TOKEN}" | crane auth login ghcr.io -u "${GHCR_ACTOR}" --password-stdin
 
       - name: Checkout Talos
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -172,6 +207,7 @@ jobs:
           repository: siderolabs/talos
           ref: ${{ inputs.talos_version }}
           path: talos
+          persist-credentials: false
 
       - name: Extract PKGS version
         id: pkgs
@@ -181,46 +217,71 @@ jobs:
 
       - name: Build installer-base
         working-directory: talos
+        env:
+          TALOS_VERSION: ${{ inputs.talos_version }}
         run: |
           make installer-base \
             PUSH=true \
-            REGISTRY=${{ env.LOCAL_REGISTRY }} \
-            USERNAME=${{ env.USERNAME }} \
-            PKG_KERNEL=ghcr.io/${{ env.USERNAME }}/kernel:${{ inputs.talos_version }}
+            "REGISTRY=${LOCAL_REGISTRY}" \
+            "USERNAME=${USERNAME}" \
+            "PKG_KERNEL=ghcr.io/${USERNAME}/kernel:${TALOS_VERSION}"
 
       - name: Push installer-base to GHCR
+        env:
+          TALOS_VERSION: ${{ inputs.talos_version }}
         run: |
           crane copy --insecure \
-            ${{ env.LOCAL_REGISTRY }}/${{ env.USERNAME }}/installer-base:${{ inputs.talos_version }} \
-            ghcr.io/${{ env.USERNAME }}/installer-base:${{ inputs.talos_version }}
+            "${LOCAL_REGISTRY}/${USERNAME}/installer-base:${TALOS_VERSION}" \
+            "ghcr.io/${USERNAME}/installer-base:${TALOS_VERSION}"
 
       - name: Build imager
         working-directory: talos
+        env:
+          TALOS_VERSION: ${{ inputs.talos_version }}
         run: |
           make imager \
             PUSH=true \
-            REGISTRY=${{ env.LOCAL_REGISTRY }} \
-            USERNAME=${{ env.USERNAME }} \
-            PKG_KERNEL=ghcr.io/${{ env.USERNAME }}/kernel:${{ inputs.talos_version }} \
+            "REGISTRY=${LOCAL_REGISTRY}" \
+            "USERNAME=${USERNAME}" \
+            "PKG_KERNEL=ghcr.io/${USERNAME}/kernel:${TALOS_VERSION}" \
             PLATFORM=linux/amd64 \
             INSTALLER_ARCH=targetarch
 
       - name: Push imager to GHCR
+        env:
+          TALOS_VERSION: ${{ inputs.talos_version }}
         run: |
           crane copy --insecure \
-            ${{ env.LOCAL_REGISTRY }}/${{ env.USERNAME }}/imager:${{ inputs.talos_version }} \
-            ghcr.io/${{ env.USERNAME }}/imager:${{ inputs.talos_version }}
+            "${LOCAL_REGISTRY}/${USERNAME}/imager:${TALOS_VERSION}" \
+            "ghcr.io/${USERNAME}/imager:${TALOS_VERSION}"
 
+      # gh は runner に入っているので、contents: write を持つサードパーティ
+      # action を 1 つ減らせる。既存リリースがあれば作り直さず本文だけ更新する
+      # （workflow_dispatch で同じ版を回したときの挙動を元の action に合わせる）。
       - name: Create pre-release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
-        with:
-          tag_name: ${{ inputs.talos_version }}
-          name: Talos ${{ inputs.talos_version }}
-          prerelease: true
-          body: |
-            Custom Talos build with UFS + SecureBoot support.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TALOS_VERSION: ${{ inputs.talos_version }}
+          PKGS_VERSION: ${{ steps.pkgs.outputs.version }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/notes.md <<EOF
+          Custom Talos build with UFS + SecureBoot support.
 
-            - Talos: ${{ inputs.talos_version }}
-            - PKGS: ${{ steps.pkgs.outputs.version }}
+          - Talos: ${TALOS_VERSION}
+          - PKGS: ${PKGS_VERSION}
 
-            Waiting for SecureBoot signing...
+          Waiting for SecureBoot signing...
+          EOF
+
+          if gh release view "$TALOS_VERSION" > /dev/null 2>&1; then
+            gh release edit "$TALOS_VERSION" \
+              --title "Talos ${TALOS_VERSION}" \
+              --prerelease \
+              --notes-file /tmp/notes.md
+          else
+            gh release create "$TALOS_VERSION" \
+              --title "Talos ${TALOS_VERSION}" \
+              --prerelease \
+              --notes-file /tmp/notes.md
+          fi
