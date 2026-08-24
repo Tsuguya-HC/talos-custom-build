@@ -1,0 +1,47 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+
+  // No aqua preset: this repo has no aqua.yaml. Its toolchain is whatever the
+  // Talos build containers carry.
+  "extends": [
+    // config:best-practices = config:recommended + docker:pinDigests
+    // + helpers:pinGitHubActionDigests + :configMigration + :pinDevDependencies
+    // + abandonments:recommended + security:minimumReleaseAgeNpm
+    // + :maintainLockFilesWeekly. The two presets listed separately before are
+    // both inside it now.
+    "config:best-practices"
+  ],
+
+  "minimumReleaseAge": "3 days",
+
+  "packageRules": [
+    {
+      "description": [
+        "First-party code does not soak. minimumReleaseAge buys time for someone",
+        "else to notice a poisoned release before we take it; there is no someone",
+        "else here — we wrote it, reviewed it and merged it. Waiting three days on",
+        "our own reusable workflow only delays fixes to the thing that gates every",
+        "other check."
+      ],
+      "matchPackageNames": ["Tsuguya/**"],
+      "minimumReleaseAge": "0"
+    },
+    {
+      "description": [
+        "A digest has no release date attached (renovate#38656), so the age gate",
+        "cannot be evaluated and renovate/stability-days is set but never clears.",
+        "horenso#22 — a plain node:22-alpine digest pin — sat pending on exactly",
+        "this for 84 days. digest-cooldown gates these on its own clock instead."
+      ],
+      "matchUpdateTypes": ["digest", "pinDigest"],
+      "minimumReleaseAge": "0"
+    },
+    {
+      // Only patch and digest. A minor bump to anything in the image build is a
+      // different Talos artifact, which is a decision, not a refresh.
+      "description": "Automerge patch updates",
+      "matchUpdateTypes": ["patch", "digest"],
+      "automerge": true
+    }
+  ]
+}
