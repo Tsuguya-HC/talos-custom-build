@@ -3,9 +3,29 @@ name: CI
 # このリポジトリには長らく pull_request で走る検査が無く、zizmor の指摘が
 # 51 件（うち high 14）溜まっていた。共有ワークフローを呼んで、
 # ワークフロー自身と Renovate 設定の両方を毎 PR で見る。
+#
+# 必須ステータスチェックを単一 gate に集約するオーケストレーター。
+# トリガーに paths フィルタは付けない。leaf をトリガー側で絞ると、該当しない
+# PR ではチェックが報告されず、必須化された context が
+# "Expected — Waiting for status to be reported" のまま永久にブロックする。
+# 代わりに起動は常にして、`detect` が leaf ごとの実行要否を出す。skip した
+# leaf は gate から見て `skipped` = 合格扱いになるので、報告は常に発生する。
+#
+# ここの leaf は 2 つとも軽いので、detect が削るのは 1 run あたり数分。
+# それでも入れるのは、GitHub が**ジョブ単位で 1 分に切り上げて課金する**ため。
+# 10 秒で終わる actionlint も 1 分として数えられるので、走らせないことが
+# そのまま効く。`extensions/` や `kernel/` だけを触る PR なら両方 skip される。
 on:
   pull_request:
     branches: [main]
+    # `edited` on top of the default opened/synchronize/reopened. Changing a
+    # PR's base is an `edited` activity, so a PR opened against another branch
+    # and later retargeted at main never produced a CI Gate check at all.
+    #
+    # detect を入れたことで塞ぐものが 1 つ増えた。retarget では head SHA が
+    # 変わらないので、`edited` が無いと旧 base で計算した detect の結果
+    # （= leaf を skip した緑）がそのまま新 base の必須チェックに流用できる。
+    types: [opened, synchronize, reopened, edited]
 
 permissions: {}
 
@@ -14,27 +34,67 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 変更ファイル種別を判定し、各 leaf を実行すべきかを outputs で返す。
+  # merge-base 等のエッジケースを正しく扱うため dorny/paths-filter を使う。
+  detect:
+    name: detect changes
+    # checkout と paths-filter しか動かないので slim で足りる。
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read # dorny/paths-filter が PR の変更ファイル一覧を API 取得するために必要
+    outputs:
+      workflows: ${{ steps.filter.outputs.workflows }}
+      renovate: ${{ steps.filter.outputs.renovate }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            workflows:
+              - '.github/workflows/**'
+              - '.github/zizmor.yml'
+            renovate:
+              - 'renovate.json*'
+
   # ワークフローの lint は 6 リポジトリ共通なので home-actions に寄せてある。
   # ツールのピンは向こう側にあり、ここは呼び先の SHA を追うだけ。
   lint-workflows:
-    uses: Tsuguya/home-actions/.github/workflows/lint-workflows.yml@bd99e01e99bcce1b845aa7abae3b3ed3b61f464f # v1.1.0
+    needs: detect
+    if: ${{ needs.detect.outputs.workflows == 'true' }}
+    uses: Tsuguya/home-actions/.github/workflows/lint-workflows.yml@10834ead7a2c2ca71677a6b818cd066d329eacbb # v1.2.0
     permissions:
       contents: read
 
   # Renovate 設定の検証。Renovate は知らないキーを黙って捨てるので（PR も警告も
   # 出ない）、バリデータだけがこの層の間違いを検出できる。
   lint-renovate:
-    uses: Tsuguya/home-actions/.github/workflows/lint-renovate.yml@bd99e01e99bcce1b845aa7abae3b3ed3b61f464f # v1.1.0
+    needs: detect
+    if: ${{ needs.detect.outputs.renovate == 'true' }}
+    uses: Tsuguya/home-actions/.github/workflows/lint-renovate.yml@10834ead7a2c2ca71677a6b818cd066d329eacbb # v1.2.0
     permissions:
       contents: read
 
   # 必須チェックにするならこれ 1 個だけを登録する。個別ジョブ名を必須化すると、
   # 名前を変えた瞬間に全 PR が "Waiting for status to be reported" で詰まる。
+  #
+  # `detect` も needs に含める。detect が失敗すると全 leaf の `if` が偽になって
+  # skip され、skip は合格扱いなので、detect を見ていないと「何も検査していない
+  # 緑」が必須チェックを満たしてしまう。
   gate:
     name: CI Gate
-    needs: [lint-workflows, lint-renovate]
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
+    needs: [detect, lint-workflows, lint-renovate]
+    # `always()` ではなく `!cancelled()`。always() だと run をキャンセルしたとき
+    # 全ての leaf が `cancelled` を返し、下の case をすり抜けて必須チェックが
+    # 失敗として記録される。キャンセルされた run に下すべき判定は無い。
+    if: ${{ !cancelled() }}
+    # 集計は bash の for ループだけなので slim で足りる。
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -55,3 +115,4 @@ jobs:
               *) echo "::error::A required job concluded with: ${r}"; exit 1 ;;
             esac
           done
+          echo "All required jobs passed or were correctly skipped."

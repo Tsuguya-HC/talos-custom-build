@@ -264,6 +264,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TALOS_VERSION: ${{ inputs.talos_version }}
+          REPO: ${{ github.repository }}
           PKGS_VERSION: ${{ steps.pkgs.outputs.version }}
         run: |
           set -euo pipefail
@@ -276,13 +277,13 @@ jobs:
           Waiting for SecureBoot signing...
           EOF
 
-          if gh release view "$TALOS_VERSION" > /dev/null 2>&1; then
-            gh release edit "$TALOS_VERSION" \
+          if gh release view "$TALOS_VERSION" --repo "$REPO" > /dev/null 2>&1; then
+            gh release edit "$TALOS_VERSION" --repo "$REPO" \
               --title "Talos ${TALOS_VERSION}" \
               --prerelease \
               --notes-file /tmp/notes.md
           else
-            gh release create "$TALOS_VERSION" \
+            gh release create "$TALOS_VERSION" --repo "$REPO" \
               --title "Talos ${TALOS_VERSION}" \
               --prerelease \
               --notes-file /tmp/notes.md
