@@ -25,7 +25,7 @@ GHA (build.yml)                        Argo Workflows (home-cluster)
 
 - **GHA**: カスタムカーネル + imager ビルド（秘密不要）
 - **Argo WF**: SecureBoot 署名（署名鍵はクラスタ内 1Password 管理、GitHub に渡らない）
-- **トリガー**: 手動 (`workflow_dispatch`) or 毎週月曜に新 Talos リリースを自動チェック (`check-release.yml`)
+- **トリガー**: 手動 (`workflow_dispatch`) or 毎日新 Talos リリースをチェックし、公開から 3 日経ってからビルド (`check-release.yml`)
 
 ### 成果物
 
